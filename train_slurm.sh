@@ -1,15 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=train-trafficscope
-#SBATCH --time=120:00:00              # 时间限制
-#SBATCH --partition=gpu               # 使用GPU分区
-#SBATCH --exclude=GPU41
-#SBATCH --gres=gpu:1                  # 请求1个GPU
-#SBATCH --mem=64G                     # 内存
-#SBATCH --nodes=1                     # 节点数
-#SBATCH --ntasks=1                    # 任务数
-#SBATCH --cpus-per-task=4             # 每任务CPU核数
-#SBATCH --output=./outputs/trafficscope/train_%j.out
-#SBATCH --error=./outputs/trafficscope/train_%j.err
+#SBATCH --job-name=train-trafficllm-csy
+#SBATCH --time=120:00:00              # estimate time limit of the job
+#SBATCH --partition=big            # use the 'gpu' partition
+#SBATCH --gres=shard:A800:1        # request 1 GPU, or use gpu:V100:1 to specify GPU type
+#SBATCH --mem=100G                      # request 2 GB RAM
+#SBATCH --nodes=1                     # total number of nodes
+#SBATCH --ntasks=1                    # total number of tasks
+#SBATCH --cpus-per-task 4             # number of CPU cores per task      
+#SBATCH --output=./logs/ITC_Net_A/train_temporal.out
+#SBATCH --error=./logs/ITC_Net_A/train_temporal.err
 
 # 打印信息
 echo "Submitting job from directory: ${SLURM_SUBMIT_DIR}"
@@ -21,28 +20,39 @@ echo "Current node: ${SLURM_NODELIST}"
 eval "$(conda shell.bash hook)"
 
 # 激活环境
-conda activate myflowenv
+conda activate trafficscope
+
 
 # ==================== 超参数配置 ====================
-# 数据路径
-DATA_DIR="/media/store/csy_data/ITC-Net-Blend-60/TrafficScope_data/ITC_Net_A"
 
-# 模型配置 (修改这里选择不同模型)
+DATASET="ITC_Net_A"
 # 选项: temporal, contextual, fusion
-MODEL_TYPE="fusion"
+MODEL_TYPE="temporal"
+# 数据路径
+DATA_DIR="dataset/${DATASET}"
+# 类别数
+NUM_CLASSES=58
+# early stopping
+EPOCHS=50
+PATIENCE=4
 
 # 训练超参数
-NUM_CLASSES=60
 BATCH_SIZE=32
-EPOCHS=10
 LR=0.001
 NUM_HEADS=8
-NUM_LAYERS=2
+NUM_LAYERS=4
 DROPOUT=0.5
 
+# 数据维度
+TEMPORAL_SEQ_LEN=128
+PACKET_LEN=64
+FREQS_SIZE=128
+AGG_POINTS_NUM=128
+AGG_SCALE_NUM=3
+
 # 输出路径
-MODEL_DIR="./models"
-RESULT_DIR="./results"
+MODEL_DIR="./models/${DATASET}/${MODEL_TYPE}"
+RESULT_DIR="./results/${DATASET}/${MODEL_TYPE}"
 
 # 创建输出目录
 mkdir -p outputs/trafficscope
@@ -99,11 +109,16 @@ python train_test.py \
     --num_classes=$NUM_CLASSES \
     --batch_size=$BATCH_SIZE \
     --epochs=$EPOCHS \
+    --patience=$PATIENCE \
     --lr=$LR \
     --num_heads=$NUM_HEADS \
     --num_layers=$NUM_LAYERS \
     --dropout=$DROPOUT \
     --model_path="$MODEL_PATH" \
-    --result_path="$RESULT_PATH"
+    --result_path="$RESULT_PATH" \
+    --temporal_seq_len=$TEMPORAL_SEQ_LEN \
+    --packet_len=$PACKET_LEN \
+    --agg_points_num=$AGG_POINTS_NUM \
+    --freqs_size=$FREQS_SIZE \
 
 echo "训练完成！"
