@@ -16,11 +16,22 @@ from interpretability import attention_rollout, attention_normalize
 from robustness import get_robustness_test_dataset
 
 
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if hours:
+        return f'{hours}h{minutes:02d}m{seconds:02d}s'
+    if minutes:
+        return f'{minutes}m{seconds:02d}s'
+    return f'{seconds}s'
+
+
 def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
                        temporal_seq_len, packet_len, freqs_size, agg_scale_num, agg_points_num,
                        use_temporal, use_contextual,
                        num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path, device,
-                       patience=4):
+                       patience=4, log_interval=50):
     train_dataset = TrafficScopeDataset(data_dir, agg_scales, train_idx)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -47,8 +58,10 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
 
     print(f'load model successfully. Start training...')
     print(f'Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}')
+    print(f'Train batches: {len(train_dataloader)}, Val batches: {len(val_dataloader)}')
     print(f'Data split - Train:Val:Test = 1:1:8 (10% : 10% : 80%)')
     print(f'Early stopping patience: {patience}')
+    print(f'Progress log interval: every {log_interval} batches')
     train_start_time = time.time()
 
     best_f1 = 0.0
@@ -62,6 +75,7 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
         # 训练阶段
         model.train()
         train_loss = 0.0
+        running_loss = 0.0
         for batch_idx, (batch_temporal_data, batch_temporal_valid_len,
                         batch_contextual_data, batch_contextual_segments, batch_labels) in enumerate(train_dataloader):
             batch_start_time = time.time()
@@ -81,11 +95,31 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
             optimizer.step()
             optimizer.zero_grad()
             train_loss += loss.item()
+            running_loss += loss.item()
             batch_end_time = time.time()
 
-            if batch_idx % 100 == 0:
-                print(f'Train loss: {loss.item():.4f}, time: {batch_end_time - batch_start_time:.2f}s, '
-                      f'[{batch_idx + 1}]/[{len(train_dataloader)}]')
+            should_log = (batch_idx + 1) == 1 or (batch_idx + 1) % log_interval == 0 or \
+                (batch_idx + 1) == len(train_dataloader)
+            if should_log:
+                batches_done = batch_idx + 1
+                elapsed = batch_end_time - epoch_start_time
+                avg_batch_time = elapsed / batches_done
+                eta_epoch = avg_batch_time * (len(train_dataloader) - batches_done)
+                remaining_epochs = epochs - epoch - 1
+                eta_total = eta_epoch + remaining_epochs * avg_batch_time * len(train_dataloader)
+                current_interval = log_interval if batches_done % log_interval == 0 else \
+                    (batches_done % log_interval or log_interval)
+                avg_recent_loss = running_loss / current_interval
+                seen_samples = min(batches_done * batch_size, len(train_dataset))
+                samples_per_sec = seen_samples / elapsed if elapsed > 0 else 0.0
+                print(f'Epoch {epoch+1}/{epochs} Train [{batches_done}/{len(train_dataloader)}] '
+                      f'loss={loss.item():.4f} avg_recent={avg_recent_loss:.4f} '
+                      f'samples={seen_samples}/{len(train_dataset)} '
+                      f'throughput={samples_per_sec:.1f}/s '
+                      f'elapsed={format_duration(elapsed)} '
+                      f'eta_epoch={format_duration(eta_epoch)} '
+                      f'eta_total={format_duration(eta_total)}')
+                running_loss = 0.0
 
         avg_train_loss = train_loss / len(train_dataloader)
 
@@ -96,8 +130,10 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
         all_labels = []
 
         with torch.no_grad():
-            for batch_temporal_data, batch_temporal_valid_len, \
-                batch_contextual_data, batch_contextual_segments, batch_labels in val_dataloader:
+            val_start_time = time.time()
+            for val_batch_idx, (batch_temporal_data, batch_temporal_valid_len,
+                                batch_contextual_data, batch_contextual_segments,
+                                batch_labels) in enumerate(val_dataloader):
                 batch_temporal_data, batch_temporal_valid_len, \
                 batch_contextual_data, batch_contextual_segments, batch_labels = \
                     batch_temporal_data.to(device), batch_temporal_valid_len.to(device), \
@@ -115,6 +151,15 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
                 preds = probs.argmax(1).cpu()
                 all_preds.extend(preds.numpy())
                 all_labels.extend(batch_labels.cpu().numpy())
+                should_log = (val_batch_idx + 1) == 1 or (val_batch_idx + 1) % log_interval == 0 or \
+                    (val_batch_idx + 1) == len(val_dataloader)
+                if should_log:
+                    batches_done = val_batch_idx + 1
+                    elapsed = time.time() - val_start_time
+                    avg_batch_time = elapsed / batches_done
+                    eta_val = avg_batch_time * (len(val_dataloader) - batches_done)
+                    print(f'Epoch {epoch+1}/{epochs} Val [{batches_done}/{len(val_dataloader)}] '
+                          f'elapsed={format_duration(elapsed)} eta={format_duration(eta_val)}')
 
         avg_val_loss = val_loss / len(val_dataloader)
         val_acc = accuracy_score(all_labels, all_preds)
@@ -157,7 +202,8 @@ def test_TrafficScope(data_dir, agg_scales, test_idx,
                       temporal_seq_len, packet_len, agg_scale_num, agg_points_num, freqs_size,
                       batch_size, model_path, num_classes, result_path, device,
                       robust_test_name,
-                      rho=None, kappa=None, different=None, alpha=None, eta=None, beta=None, gamma=None):
+                      rho=None, kappa=None, different=None, alpha=None, eta=None, beta=None, gamma=None,
+                      log_interval=50):
     test_dataset = TrafficScopeDataset(data_dir, agg_scales, test_idx)
     if robust_test_name:
         test_dataset = get_robustness_test_dataset(test_dataset,
@@ -234,6 +280,16 @@ def test_TrafficScope(data_dir, agg_scales, test_idx,
                 contextual_features[data_idx:data_idx+batch_len] = batch_contextual_features.cpu()
                 fusion_futures[data_idx:data_idx+batch_len] = batch_fusion_features.cpu()
             data_idx += batch_len
+            should_log = (batch_idx + 1) == 1 or (batch_idx + 1) % log_interval == 0 or \
+                (batch_idx + 1) == len(test_dataloader)
+            if should_log:
+                batches_done = batch_idx + 1
+                elapsed = time.time() - test_start_time
+                avg_batch_time = elapsed / batches_done
+                eta_test = avg_batch_time * (len(test_dataloader) - batches_done)
+                print(f'Test [{batches_done}/{len(test_dataloader)}] '
+                      f'samples={data_idx}/{data_num} '
+                      f'elapsed={format_duration(elapsed)} eta={format_duration(eta_test)}')
 
     acc = accuracy_score(y_true.numpy(), y_preds.numpy())
     pre = precision_score(y_true.numpy(), y_preds.numpy(), average='macro')
@@ -288,7 +344,7 @@ def train_test_helper(data_dir, agg_scales, model_name, agg_scale_num, agg_point
                       num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path, result_path,
                       robust_test_name,
                       rho=None, kappa=None, different=None, alpha=None, eta=None, beta=None, gamma=None,
-                      k_fold=None, gpu_id=0, patience=4):
+                      k_fold=None, gpu_id=0, patience=4, log_interval=50):
     os.environ['CUDA_VISIBLE_DEVICE'] = str(gpu_id)
     dataset = TrafficScopeDataset(data_dir, agg_scales)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -327,13 +383,13 @@ def train_test_helper(data_dir, agg_scales, model_name, agg_scale_num, agg_point
                                temporal_seq_len, packet_len, freqs_size, agg_scale_num, agg_points_num,
                                use_temporal, use_contextual,
                                num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path,
-                               device, patience)
+                               device, patience, log_interval)
         if is_test:
             test_TrafficScope(data_dir, agg_scales, test_idx,
                               temporal_seq_len, packet_len, agg_scale_num, agg_points_num, freqs_size,
                               batch_size, model_path, num_classes, result_path, device,
                               robust_test_name,
-                              rho, kappa, different, alpha, eta, beta, gamma)
+                              rho, kappa, different, alpha, eta, beta, gamma, log_interval)
 
 
 if __name__ == '__main__':
@@ -370,6 +426,8 @@ if __name__ == '__main__':
     args.add_argument('--beta', type=float, default=None, required=False)
     args.add_argument('--gamma', type=float, default=None, required=False)
     args.add_argument('--patience', type=int, default=4, required=False, help='Early stopping patience (default: 4)')
+    args.add_argument('--log_interval', type=int, default=50, required=False,
+                      help='Print progress every N batches (default: 50)')
     args = args.parse_args()
     print(args)
 
@@ -381,4 +439,4 @@ if __name__ == '__main__':
                       args.dropout, args.lr, args.epochs, args.model_path, args.result_path,
                       args.robust_test_name,
                       args.rho, args.kappa, args.different, args.alpha, args.eta, args.beta, args.gamma,
-                      args.k_fold, args.gpu_id, args.patience)
+                      args.k_fold, args.gpu_id, args.patience, args.log_interval)

@@ -35,6 +35,7 @@ NUM_CLASSES=58
 # early stopping
 EPOCHS=50
 PATIENCE=4
+LOG_INTERVAL=50
 
 # 训练超参数
 BATCH_SIZE=32
@@ -110,6 +111,7 @@ python train_test.py \
     --batch_size=$BATCH_SIZE \
     --epochs=$EPOCHS \
     --patience=$PATIENCE \
+    --log_interval=$LOG_INTERVAL \
     --lr=$LR \
     --num_heads=$NUM_HEADS \
     --num_layers=$NUM_LAYERS \
