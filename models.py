@@ -104,18 +104,18 @@ class DotProductAttention(nn.Module):
 
 def masked_softmax(X, valid_lens):
     """通过在最后一个轴上掩码元素来执行softmax操作"""
-    # X: 3D tensor, valid_lens: 1D or 2D tensor
+    # X: 3D tensor [batch_size * num_heads, seq_len, seq_len]
+    # valid_lens: 1D tensor [batch_size * num_heads]
     if valid_lens is None:
         return nn.functional.softmax(X, dim=-1)
     else:
         shape = X.shape
-        if valid_lens.dim() == 1:
-            valid_lens = torch.repeat_interleave(valid_lens, repeats=shape[1], dim=0)
-        else:
-            valid_lens = valid_lens.reshape(-1)
+        seq_len = shape[2]
 
-        # 创建掩码
-        mask = torch.arange(shape[2], device=X.device)[None, None, :] >= valid_lens[:, None, None]
+        # 创建掩码: [batch_size * num_heads, 1, seq_len]
+        mask = torch.arange(seq_len, device=X.device)[None, :] >= valid_lens[:, None]
+        mask = mask[:, None, :]  # [batch_size * num_heads, 1, seq_len]
+
         # 最后一轴上被掩蔽的元素使用一个非常大的负值替换
         X = X.masked_fill(mask, -1e6)
         return nn.functional.softmax(X, dim=-1)
