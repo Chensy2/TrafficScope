@@ -16,12 +16,16 @@ from interpretability import attention_rollout, attention_normalize
 from robustness import get_robustness_test_dataset
 
 
-def train_TrafficScope(data_dir, agg_scales, train_idx, batch_size,
+def train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
                        temporal_seq_len, packet_len, freqs_size, agg_scale_num, agg_points_num,
                        use_temporal, use_contextual,
-                       num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path, device):
+                       num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path, device,
+                       patience=4):
     train_dataset = TrafficScopeDataset(data_dir, agg_scales, train_idx)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    val_dataset = TrafficScopeDataset(data_dir, agg_scales, val_idx)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     if use_temporal and use_contextual:
         model = TrafficScope(temporal_seq_len, packet_len,
@@ -41,11 +45,23 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, batch_size,
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    print('load model successfully. Start training...')
+    print(f'load model successfully. Start training...')
+    print(f'Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}')
+    print(f'Data split - Train:Val:Test = 1:1:8 (10% : 10% : 80%)')
+    print(f'Early stopping patience: {patience}')
     train_start_time = time.time()
+
+    best_f1 = 0.0
+    patience_counter = 0
+    best_model_state = None
+
     for epoch in range(epochs):
-        print(f'\nEpoch {epoch+1}\n--------------------')
+        print(f'\nEpoch {epoch+1}/{epochs}\n--------------------')
         epoch_start_time = time.time()
+
+        # 训练阶段
+        model.train()
+        train_loss = 0.0
         for batch_idx, (batch_temporal_data, batch_temporal_valid_len,
                         batch_contextual_data, batch_contextual_segments, batch_labels) in enumerate(train_dataloader):
             batch_start_time = time.time()
@@ -64,21 +80,77 @@ def train_TrafficScope(data_dir, agg_scales, train_idx, batch_size,
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+            train_loss += loss.item()
             batch_end_time = time.time()
 
             if batch_idx % 100 == 0:
-                print(f'loss: {loss.item()}, time cost: {batch_end_time - batch_start_time} s, '
+                print(f'Train loss: {loss.item():.4f}, time: {batch_end_time - batch_start_time:.2f}s, '
                       f'[{batch_idx + 1}]/[{len(train_dataloader)}]')
+
+        avg_train_loss = train_loss / len(train_dataloader)
+
+        # 验证阶段
+        model.eval()
+        val_loss = 0.0
+        all_preds = []
+        all_labels = []
+
+        with torch.no_grad():
+            for batch_temporal_data, batch_temporal_valid_len, \
+                batch_contextual_data, batch_contextual_segments, batch_labels in val_dataloader:
+                batch_temporal_data, batch_temporal_valid_len, \
+                batch_contextual_data, batch_contextual_segments, batch_labels = \
+                    batch_temporal_data.to(device), batch_temporal_valid_len.to(device), \
+                    batch_contextual_data.to(device), batch_contextual_segments.to(device), batch_labels.to(device)
+
+                if model.model_name == TRAFFIC_SCOPE:
+                    probs = model(batch_temporal_data, batch_temporal_valid_len,
+                                  batch_contextual_data, batch_contextual_segments)
+                elif model.model_name == TRAFFIC_SCOPE_TEMPORAL:
+                    probs = model(batch_temporal_data, batch_temporal_valid_len)
+                else:
+                    probs = model(batch_contextual_data, batch_contextual_segments)
+
+                val_loss += loss_fn(probs, batch_labels).item()
+                preds = probs.argmax(1).cpu()
+                all_preds.extend(preds.numpy())
+                all_labels.extend(batch_labels.cpu().numpy())
+
+        avg_val_loss = val_loss / len(val_dataloader)
+        val_acc = accuracy_score(all_labels, all_preds)
+        val_f1 = f1_score(all_labels, all_preds, average='weighted')
+
         epoch_end_time = time.time()
-        print(f'Epoch time cost: {epoch_end_time - epoch_start_time} s')
+        print(f'Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}')
+        print(f'Val Acc: {val_acc:.4f}, Val F1: {val_f1:.4f}, Time: {epoch_end_time - epoch_start_time:.2f}s')
+
+        # 早停逻辑
+        if val_f1 > best_f1:
+            best_f1 = val_f1
+            patience_counter = 0
+            best_model_state = model.state_dict()
+            print(f'✓ New best model saved! Best F1: {best_f1:.4f}')
+        else:
+            patience_counter += 1
+            print(f'No improvement. Patience: {patience_counter}/{patience}')
+
+        if patience_counter >= patience:
+            print(f'\n Early stopping triggered after {epoch + 1} epochs!')
+            break
 
     train_end_time = time.time()
+
+    # 加载最佳模型
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f'Loaded best model with F1: {best_f1:.4f}')
+
     model_dir = os.path.split(model_path)[0]
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
     torch.save(model, model_path)
     print(f'save {model_path} successfully')
-    print(f'train {model.model_name} Done! Time cost: {train_end_time - train_start_time}')
+    print(f'train {model.model_name} Done! Time cost: {train_end_time - train_start_time:.2f}s')
 
 
 def test_TrafficScope(data_dir, agg_scales, test_idx,
@@ -216,42 +288,38 @@ def train_test_helper(data_dir, agg_scales, model_name, agg_scale_num, agg_point
                       num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path, result_path,
                       robust_test_name,
                       rho=None, kappa=None, different=None, alpha=None, eta=None, beta=None, gamma=None,
-                      k_fold=None, gpu_id=0):
+                      k_fold=None, gpu_id=0, patience=4):
     os.environ['CUDA_VISIBLE_DEVICE'] = str(gpu_id)
     dataset = TrafficScopeDataset(data_dir, agg_scales)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if k_fold:
-        skf = StratifiedKFold(n_splits=k_fold, shuffle=True, random_state=42)
-        for train_idx, test_idx in skf.split(dataset.temporal_data.numpy(), dataset.labels.numpy()):
-            if model_name == TRAFFIC_SCOPE:
-                if is_train:
-                    train_TrafficScope(data_dir, agg_scales, train_idx, batch_size,
-                                       temporal_seq_len, packet_len, freqs_size, agg_scale_num, agg_points_num,
-                                       use_temporal, use_contextual,
-                                       num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path,
-                                       device)
-                if is_test:
-                    test_TrafficScope(data_dir, agg_scales, test_idx,
-                                      temporal_seq_len, packet_len, agg_scale_num, agg_points_num, freqs_size,
-                                      batch_size, model_path, num_classes, result_path, device,
-                                      robust_test_name,
-                                      rho, kappa, different, alpha, eta, beta, gamma)
-    else:
-        indices = np.arange(dataset.temporal_data.shape[0])
-        train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42, shuffle=True)
-        if model_name == TRAFFIC_SCOPE:
-            if is_train:
-                train_TrafficScope(data_dir, agg_scales, train_idx, batch_size,
-                                   temporal_seq_len, packet_len, freqs_size, agg_scale_num, agg_points_num,
-                                   use_temporal, use_contextual,
-                                   num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path,
-                                   device)
-            if is_test:
-                test_TrafficScope(data_dir, agg_scales, test_idx,
-                                  temporal_seq_len, packet_len, agg_scale_num, agg_points_num, freqs_size,
-                                  batch_size, model_path, num_classes, result_path, device,
-                                  robust_test_name,
-                                  rho, kappa, different, alpha, eta, beta, gamma)
+
+    # 数据划分: Train:Val:Test = 1:1:8 (10% : 10% : 80%)
+    indices = np.arange(dataset.temporal_data.shape[0])
+
+    # 先划分出测试集(80%)和临时集(20%)
+    temp_idx, test_idx = train_test_split(indices, test_size=0.8, random_state=42, shuffle=True)
+    # 再将临时集划分为训练集(50%)和验证集(50%)
+    train_idx, val_idx = train_test_split(temp_idx, test_size=0.5, random_state=42, shuffle=True)
+
+    print(f'\n数据集划分:')
+    print(f'  训练集: {len(train_idx)} ({len(train_idx)/len(indices)*100:.1f}%)')
+    print(f'  验证集: {len(val_idx)} ({len(val_idx)/len(indices)*100:.1f}%)')
+    print(f'  测试集: {len(test_idx)} ({len(test_idx)/len(indices)*100:.1f}%)')
+    print(f'  总计: {len(indices)}\n')
+
+    if model_name == TRAFFIC_SCOPE:
+        if is_train:
+            train_TrafficScope(data_dir, agg_scales, train_idx, val_idx, batch_size,
+                               temporal_seq_len, packet_len, freqs_size, agg_scale_num, agg_points_num,
+                               use_temporal, use_contextual,
+                               num_heads, num_layers, num_classes, dropout, learning_rate, epochs, model_path,
+                               device, patience)
+        if is_test:
+            test_TrafficScope(data_dir, agg_scales, test_idx,
+                              temporal_seq_len, packet_len, agg_scale_num, agg_points_num, freqs_size,
+                              batch_size, model_path, num_classes, result_path, device,
+                              robust_test_name,
+                              rho, kappa, different, alpha, eta, beta, gamma)
 
 
 if __name__ == '__main__':
@@ -287,6 +355,7 @@ if __name__ == '__main__':
     args.add_argument('--eta', type=int, default=None, required=False)
     args.add_argument('--beta', type=float, default=None, required=False)
     args.add_argument('--gamma', type=float, default=None, required=False)
+    args.add_argument('--patience', type=int, default=4, required=False, help='Early stopping patience (default: 4)')
     args = args.parse_args()
     print(args)
 
@@ -298,4 +367,4 @@ if __name__ == '__main__':
                       args.dropout, args.lr, args.epochs, args.model_path, args.result_path,
                       args.robust_test_name,
                       args.rho, args.kappa, args.different, args.alpha, args.eta, args.beta, args.gamma,
-                      args.k_fold, args.gpu_id)
+                      args.k_fold, args.gpu_id, args.patience)
