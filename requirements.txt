@@ -1,0 +1,20 @@
+# PyTorch and ML dependencies
+torch>=1.9.0
+numpy>=1.19.0
+pandas>=1.2.0
+scikit-learn>=0.24.0
+
+# Deep learning utilities
+d2l==0.17.5
+
+# Signal processing
+PyWavelets>=1.1.1
+
+# Image processing (for interpretability.py)
+opencv-python>=4.5.0
+
+# Data serialization
+joblib>=1.0.0
+
+# Visualization (optional)
+matplotlib>=3.3.0
