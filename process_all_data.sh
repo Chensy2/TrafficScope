@@ -56,10 +56,11 @@ for LABEL_DIR in "$ROOT_DIR"/*; do
         --wave_name="$WAVE_NAME"
 
     echo "[$LABEL] 步骤2/2: 生成小波域特征..."
+    # 注意: 合并的pcap文件保存在当前工作目录，不是输出目录
     # 生成小波域特征（需要使用刚刚生成的session_used.json）
     python3 dataset_gen.py \
         --contextual \
-        --pcaps_path="$LABEL_OUTPUT_DIR/${LABEL}.pcap" \
+        --pcaps_path="${LABEL}.pcap" \
         --session_pcaps_used="$LABEL_OUTPUT_DIR/${LABEL}_temporal_session_used.json" \
         --wave_name="$WAVE_NAME" \
         --data_path="$LABEL_OUTPUT_DIR/${LABEL}.npy"
@@ -72,6 +73,18 @@ echo "======================================"
 echo "所有数据处理完成！"
 echo "输出目录: $OUTPUT_DIR"
 echo "======================================"
+
+# 清理临时pcap文件
+echo "清理临时文件..."
+for LABEL_DIR in "$ROOT_DIR"/*; do
+    if [ -d "$LABEL_DIR" ]; then
+        LABEL=$(basename "$LABEL_DIR")
+        if [ -f "${LABEL}.pcap" ]; then
+            rm -f "${LABEL}.pcap"
+            echo "删除: ${LABEL}.pcap"
+        fi
+    fi
+done
 
 # 验证生成的文件
 echo ""
