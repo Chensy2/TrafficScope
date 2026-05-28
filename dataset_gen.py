@@ -91,9 +91,9 @@ def parse_session_pcap_to_matrix(session_pcap_path, session_len, packet_len, pac
     if len(packets_dec) < 3:
         return None, None
 
-    # padding and build session matrix
-    packets_dec_matrix = pd.DataFrame(packets_dec).fillna(-1).values.astype(np.uint8)
-    session_matrix = np.ones((session_len, packet_len), dtype=np.uint8) * -1
+    # padding and build session matrix (use int8 to support -1 for padding)
+    packets_dec_matrix = pd.DataFrame(packets_dec).fillna(-1).values.astype(np.int8)
+    session_matrix = np.ones((session_len, packet_len), dtype=np.int8) * -1
     row_idx = min(packets_dec_matrix.shape[0], session_len)
     col_idx = min(packets_dec_matrix.shape[1], packet_len)
     session_matrix[:row_idx, :col_idx] = packets_dec_matrix[:row_idx, :col_idx]
