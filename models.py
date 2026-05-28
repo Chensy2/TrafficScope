@@ -145,7 +145,7 @@ class TrafficScope(nn.Module):
         temporal_feature = self.temporal_encoder(temporal_data, temporal_valid_len)
         contextual_feature = self.contextual_encoder(contextual_data, contextual_segments)
         out = self.fusion_encoder(temporal_feature, contextual_feature)
-        out = F.softmax(self.fc(torch.flatten(out, start_dim=1)), dim=-1)
+        out = self.fc(torch.flatten(out, start_dim=1))
         return out
 
     def get_temporal_attention_weights(self):
@@ -203,7 +203,7 @@ class TrafficScopeTemporal(nn.Module):
 
     def forward(self, temporal_data, temporal_valid_len):
         temporal_feature = self.temporal_encoder(temporal_data, temporal_valid_len)
-        out = F.softmax(self.fc(torch.flatten(temporal_feature, start_dim=1)), dim=-1)
+        out = self.fc(torch.flatten(temporal_feature, start_dim=1))
 
         return out
 
@@ -235,7 +235,7 @@ class TrafficScopeContextual(nn.Module):
 
     def forward(self, contextual_data, contextual_segments):
         contextual_feature = self.contextual_encoder(contextual_data, contextual_segments)
-        out = F.softmax(self.fc(torch.flatten(contextual_feature, start_dim=1)), dim=-1)
+        out = self.fc(torch.flatten(contextual_feature, start_dim=1))
 
         return out
 
