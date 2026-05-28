@@ -23,7 +23,8 @@ def merge_pcaps(pcaps_dir, pcap_save_path):
         print(f'merge pcaps in {pcaps_dir} into {pcap_save_path} successfully')
     else:
         print(f'merge pcaps in {pcaps_dir} error')
-        exit(1)
+        return False
+    return True
 
 
 def filter_protocols_in_pcap(pcap_path):
@@ -418,13 +419,16 @@ def gen_single_traffic_type_data(pcaps_path, class_name, sessions_dir, data_path
                                  agg_seqs_path=None, contextual=False):
     # merge pcaps of single class
     if os.path.isdir(pcaps_path):
-        merge_pcaps(pcaps_path, f'{class_name}.pcap')
+        if not merge_pcaps(pcaps_path, f'{class_name}.pcap'):
+            print(f'Failed to merge pcaps for {class_name}, skipping...')
+            return None
     else:
         ret = os.system(f'cp {pcaps_path} {class_name}.pcap')
         if ret == 0:
             print(f'copy {pcaps_path} to {class_name}.pcap successfully')
         else:
             print(f'copy {pcaps_path} to {class_name}.pcap error')
+            return None
 
     filter_protocols_in_pcap(f'{class_name}.pcap')
 
@@ -432,7 +436,7 @@ def gen_single_traffic_type_data(pcaps_path, class_name, sessions_dir, data_path
     print(f'{class_name} has {len(session_pcaps_used)} sessions')
 
     if not contextual:
-        return
+        return session_pcaps_used
 
     gen_contextual_data(f'{class_name}.pcap', session_pcaps_used, wave_name, data_path, agg_seqs_path)
 
