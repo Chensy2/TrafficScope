@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from torch.utils.data import Dataset
 import torch
@@ -9,23 +10,61 @@ from utils import get_contents_in_dir
 class TrafficScopeDataset(Dataset):
     def __init__(self, data_dir, agg_scales: List[int], indices=None):
         # load data and gen labels
-        temporal_data_files = get_contents_in_dir(data_dir, ['.'], ['_temporal.npy'])
-        temporal_mask_files = get_contents_in_dir(data_dir, ['.'], ['_mask.npy'])
-        contextual_data_files = get_contents_in_dir(data_dir, ['.'], ['_contextual.npy'])
+        # 支持两种目录结构:
+        # 1. data_dir/label/xxx.npy (新结构)
+        # 2. data_dir/xxx.npy (旧结构)
+
+        # 检查是否是新的目录结构 (data_dir/label/xxx.npy)
+        label_dirs = get_contents_in_dir(data_dir, [], [])
+        label_dirs = [d for d in label_dirs if os.path.isdir(d)]
+
+        temporal_data_files = []
+        temporal_mask_files = []
+        contextual_data_files = []
+
+        if label_dirs:
+            # 新目录结构: data_dir/label/xxx.npy
+            for label_dir in sorted(label_dirs):
+                label_name = os.path.basename(label_dir)
+                t_files = get_contents_in_dir(label_dir, ['.'], ['_temporal.npy'])
+                m_files = get_contents_in_dir(label_dir, ['.'], ['_mask.npy'])
+                c_files = get_contents_in_dir(label_dir, ['.'], ['_contextual.npy'])
+                for f in t_files:
+                    temporal_data_files.append((f, label_name))
+                for f in m_files:
+                    temporal_mask_files.append((f, label_name))
+                for f in c_files:
+                    contextual_data_files.append((f, label_name))
+        else:
+            # 旧目录结构: data_dir/xxx.npy
+            t_files = get_contents_in_dir(data_dir, ['.'], ['_temporal.npy'])
+            m_files = get_contents_in_dir(data_dir, ['.'], ['_mask.npy'])
+            c_files = get_contents_in_dir(data_dir, ['.'], ['_contextual.npy'])
+            for f in t_files:
+                temporal_data_files.append((f, os.path.basename(data_dir)))
+            for f in m_files:
+                temporal_mask_files.append((f, os.path.basename(data_dir)))
+            for f in c_files:
+                contextual_data_files.append((f, os.path.basename(data_dir)))
+
+        # 创建标签映射
+        unique_labels = sorted(list(set([item[1] for item in temporal_data_files])))
+        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
 
         tmp_temporal_data_list = []
         tmp_temporal_mask_data_list = []
         tmp_contextual_data_list = []
         data_len = 0
         for idx in range(len(temporal_data_files)):
-            tmp_temporal_data = np.load(temporal_data_files[idx])
-            tmp_temporal_mask_data = np.load(temporal_mask_files[idx])
-            tmp_contextual_data = np.load(contextual_data_files[idx])
+            file_path, label = temporal_data_files[idx]
+            tmp_temporal_data = np.load(file_path)
+            tmp_temporal_mask_data = np.load(temporal_mask_files[idx][0])
+            tmp_contextual_data = np.load(contextual_data_files[idx][0])
             tmp_temporal_data_list.append(tmp_temporal_data)
             tmp_temporal_mask_data_list.append(tmp_temporal_mask_data)
             tmp_contextual_data_list.append(tmp_contextual_data)
             data_len += tmp_temporal_data.shape[0]
-            print(f'load {temporal_data_files[idx]} successfully, len: {tmp_temporal_data.shape[0]}')
+            print(f'load {file_path} (label: {label}) successfully, len: {tmp_temporal_data.shape[0]}')
 
         self.temporal_data = np.zeros((data_len,
                                        tmp_temporal_data_list[0].shape[1], tmp_temporal_data_list[0].shape[2]))
@@ -41,14 +80,15 @@ class TrafficScopeDataset(Dataset):
             tmp_temporal_data = tmp_temporal_data_list[i]
             tmp_temporal_mask_data = tmp_temporal_mask_data_list[i]
             tmp_contextual_data = tmp_contextual_data_list[i]
+            label_name = temporal_data_files[i][1]
             self.temporal_data[idx:idx+tmp_temporal_data.shape[0], :, :] = tmp_temporal_data[:, :, :]
             self.temporal_mask_data[idx:idx+tmp_temporal_mask_data.shape[0], :, :] = tmp_temporal_mask_data[:, :, :]
             self.contextual_data[idx:idx+tmp_contextual_data.shape[0], :, :, :] = tmp_contextual_data[:, :, :, :]
-            self.labels[idx:idx+tmp_temporal_data.shape[0]] *= i
+            self.labels[idx:idx+tmp_temporal_data.shape[0]] = label_to_idx[label_name]
             idx += tmp_temporal_data.shape[0]
 
         print(f'total len: {data_len}')
-        print(f'class list: {temporal_data_files}')
+        print(f'class list: {unique_labels}')
 
         # gen valid len
         self.temporal_valid_len = self.temporal_mask_data.shape[1] - \
