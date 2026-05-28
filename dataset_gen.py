@@ -56,7 +56,7 @@ def split_pcap_to_sessions(pcap_path, save_dir):
         exit(1)
 
 
-def parse_session_pcap_to_matrix(session_pcap_path, session_len, packet_len, packet_offset):
+def parse_session_pcap_to_matrix(session_pcap_path, session_len, packet_len, packet_offset, min_pkt_num=3):
     """
     pcap format refer to https://www.cnblogs.com/Chary/articles/15716063.html
     :return session_matrix, padding_mask / None, None when sessioin is too short (< 3 packets)
@@ -77,6 +77,8 @@ def parse_session_pcap_to_matrix(session_pcap_path, session_len, packet_len, pac
     # parse packet raw bytes
     packets_dec = []
     while len(hexc) > 0 and len(packets_dec) < session_len:
+        if len(hexc) < 32:
+            break
         frame_len = hexc[16:24]
         if little_endian:
             frame_len = binascii.hexlify(binascii.unhexlify(frame_len)[::-1])  # reverse str due to little endian
@@ -85,11 +87,12 @@ def parse_session_pcap_to_matrix(session_pcap_path, session_len, packet_len, pac
         hexc = hexc[32:]  # remove current packet header 16 bytes
         frame_hex = hexc[packet_offset * 2:min(packet_len * 2, frame_len * 2)]
         frame_dec = [int(frame_hex[i:i + 2], 16) for i in range(0, len(frame_hex), 2)]
-        packets_dec.append(frame_dec)
+        if frame_dec:
+            packets_dec.append(frame_dec)
 
         hexc = hexc[frame_len * 2:]
 
-    if len(packets_dec) < 3:
+    if len(packets_dec) < min_pkt_num:
         return None, None
 
     # padding and build session matrix (use int8 to support -1 for padding)
@@ -141,6 +144,47 @@ def parse_pcap_metadata(pcap_path):
     return pcap_metadata
 
 
+def add_five_tuple_keys(pcap_metadata):
+    """
+    Add src/dst/protocol helper columns and five_tuple_key using the same
+    unordered 5-tuple convention as the original SplitCap filename parser.
+    """
+    if 'five_tuple_key' in pcap_metadata.columns:
+        return pcap_metadata
+
+    pcap_metadata = pcap_metadata.copy()
+    pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.src']), 'src_ip'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.src']), 'ip.src']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.dst']), 'dst_ip'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.dst']), 'ip.dst']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['ip.src']), 'src_ip'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['ip.src']), 'ipv6.src']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['ip.dst']), 'dst_ip'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['ip.dst']), 'ipv6.dst']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['udp.srcport']), 'src_port'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['udp.srcport']), 'tcp.srcport']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['udp.dstport']), 'dst_port'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['udp.dstport']), 'tcp.dstport']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.srcport']), 'src_port'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.srcport']), 'udp.srcport']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.dstport']), 'dst_port'] = \
+        pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.dstport']), 'udp.dstport']
+    pcap_metadata.loc[pd.isnull(pcap_metadata['udp.srcport']), 'protocol'] = 'TCP'
+    pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.srcport']), 'protocol'] = 'UDP'
+
+    pcap_metadata = pcap_metadata.loc[(pd.notnull(pcap_metadata['ip.src']) & pd.notnull(pcap_metadata['ip.dst'])) |
+                                      (pd.notnull(pcap_metadata['ipv6.src']) & pd.notnull(
+                                          pcap_metadata['ipv6.dst']))]
+    pcap_metadata = pcap_metadata.loc[
+        (pd.notnull(pcap_metadata['tcp.srcport']) & pd.notnull(pcap_metadata['tcp.dstport'])) |
+        (pd.notnull(pcap_metadata['udp.srcport']) & pd.notnull(pcap_metadata['udp.dstport']))]
+    pcap_metadata['five_tuple_key'] = pcap_metadata.apply(
+        lambda row: '_'.join(sorted([row.src_ip, str(int(row.src_port)),
+                                     row.dst_ip, str(int(row.dst_port)),
+                                     row.protocol])), axis=1)
+    return pcap_metadata
+
+
 def get_session_start_time(pcap_metadata, session_pcap_path):
     """
     :return: session_start_time (float), five_tuple_key (str), pcap_metadata (pd.DataFrame)
@@ -159,37 +203,7 @@ def get_session_start_time(pcap_metadata, session_pcap_path):
 
     # get the not NaN five tuple info
     # if pcap_metadata has calculated the five_tuple_key, do not calculate again
-    if 'five_tuple_key' not in pcap_metadata.columns:
-        pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.src']), 'src_ip'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.src']), 'ip.src']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.dst']), 'dst_ip'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['ipv6.dst']), 'ip.dst']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['ip.src']), 'src_ip'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['ip.src']), 'ipv6.src']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['ip.dst']), 'dst_ip'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['ip.dst']), 'ipv6.dst']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['udp.srcport']), 'src_port'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['udp.srcport']), 'tcp.srcport']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['udp.dstport']), 'dst_port'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['udp.dstport']), 'tcp.dstport']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.srcport']), 'src_port'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.srcport']), 'udp.srcport']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.dstport']), 'dst_port'] = \
-            pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.dstport']), 'udp.dstport']
-        pcap_metadata.loc[pd.isnull(pcap_metadata['udp.srcport']), 'protocol'] = 'TCP'
-        pcap_metadata.loc[pd.isnull(pcap_metadata['tcp.srcport']), 'protocol'] = 'UDP'
-
-        # filter ip and ipv6 is NaN or tcp ports and udp ports is NaN
-        pcap_metadata = pcap_metadata.loc[(pd.notnull(pcap_metadata['ip.src']) & pd.notnull(pcap_metadata['ip.dst'])) |
-                                          (pd.notnull(pcap_metadata['ipv6.src']) & pd.notnull(
-                                              pcap_metadata['ipv6.dst']))]
-        pcap_metadata = pcap_metadata.loc[
-            (pd.notnull(pcap_metadata['tcp.srcport']) & pd.notnull(pcap_metadata['tcp.dstport'])) |
-            (pd.notnull(pcap_metadata['udp.srcport']) & pd.notnull(pcap_metadata['udp.dstport']))]
-        pcap_metadata['five_tuple_key'] = pcap_metadata.apply(
-            lambda row: '_'.join(sorted([row.src_ip, str(int(row.src_port)),
-                                         row.dst_ip, str(int(row.dst_port)),
-                                         row.protocol])), axis=1)
+    pcap_metadata = add_five_tuple_keys(pcap_metadata)
 
     return pcap_metadata.loc[pcap_metadata['five_tuple_key'] == five_tuple_key, 'frame.time_epoch'].min(), \
            five_tuple_key, pcap_metadata
@@ -226,7 +240,8 @@ def get_session_contextual_packet_len_seq(pcap_metadata, session_start_time,
         agg_session_seq[int(i - start_time)] += session_seq.loc[i, 'frame.len']
     max_agg_seq_packet_len = agg_seq.max()
     max_agg_session_seq_packet_len = agg_session_seq.max()
-    agg_seq = agg_seq / max_agg_seq_packet_len * max_agg_session_seq_packet_len * beta
+    if max_agg_seq_packet_len > 0:
+        agg_seq = agg_seq / max_agg_seq_packet_len * max_agg_session_seq_packet_len * beta
     agg_seq += agg_session_seq
 
     # get session feature sequence for baselines usage, only calculate once
@@ -396,6 +411,177 @@ def gen_contextual_data(pcap_path, session_pcaps, wave_name, data_path, agg_seqs
     # visualize_data(contextual_data, data_name)
 
 
+def get_session_start_time_and_key_from_metadata(session_metadata):
+    session_metadata = add_five_tuple_keys(session_metadata)
+    if session_metadata.empty:
+        return None, None, session_metadata
+    session_start_time = session_metadata['frame.time_epoch'].min()
+    key_counts = session_metadata['five_tuple_key'].value_counts()
+    if key_counts.empty:
+        return None, None, session_metadata
+    return session_start_time, key_counts.index[0], session_metadata
+
+
+def parse_presplit_label_metadata(session_pcaps):
+    metadata_list = []
+    session_metadata_map = {}
+    for session_pcap in session_pcaps:
+        session_metadata = parse_pcap_metadata(session_pcap)
+        session_metadata = add_five_tuple_keys(session_metadata)
+        if session_metadata.empty:
+            print(f'{session_pcap} has no valid tcp/udp ip metadata, skip contextual metadata')
+            continue
+        session_metadata_map[session_pcap] = session_metadata
+        metadata_list.append(session_metadata)
+        print(f'parse metadata of {session_pcap} successfully')
+    if not metadata_list:
+        return pd.DataFrame(), session_metadata_map
+    return pd.concat(metadata_list, ignore_index=True), session_metadata_map
+
+
+def gen_presplit_temporal_data(session_pcaps, session_len, packet_len, packet_offset, min_pkt_num):
+    temporal_data = np.zeros((len(session_pcaps), session_len, packet_len))
+    temporal_mask = np.zeros((len(session_pcaps), session_len, packet_len))
+    session_pcaps_used = []
+    idx = 0
+    for session_pcap in session_pcaps:
+        session_matrix, padding_mask = parse_session_pcap_to_matrix(session_pcap, session_len,
+                                                                    packet_len, packet_offset,
+                                                                    min_pkt_num=min_pkt_num)
+        if session_matrix is None:
+            print(f'{session_pcap} is shorter than min_pkt_num={min_pkt_num}')
+            continue
+        temporal_data[idx, :, :] = session_matrix
+        temporal_mask[idx, :, :] = padding_mask
+        session_pcaps_used.append(session_pcap)
+        idx += 1
+        print(f'parse {session_pcap} successfully')
+    return temporal_data[:idx, :, :], temporal_mask[:idx, :, :], session_pcaps_used
+
+
+def gen_presplit_contextual_data(pcap_metadata, session_metadata_map, session_pcaps,
+                                 wave_name, agg_points_num):
+    contextual_data = np.zeros((len(session_pcaps), 3, agg_points_num, agg_points_num))
+    agg_seqs = np.zeros((len(session_pcaps), 3, agg_points_num))
+    session_features_seqs = []
+    seqs = []
+    session_pcaps_used = []
+    idx = 0
+    for session_pcap in session_pcaps:
+        session_metadata = session_metadata_map.get(session_pcap)
+        if session_metadata is None:
+            print(f'{session_pcap} has no metadata, skip contextual data')
+            continue
+        session_start_time, five_tuple_key, _ = get_session_start_time_and_key_from_metadata(session_metadata)
+        if session_start_time is None or five_tuple_key is None:
+            print(f'{session_pcap} has no valid start time/five tuple, skip contextual data')
+            continue
+
+        ms_agg_seq, pcap_metadata, session_features_seq, seq = get_session_contextual_packet_len_seq(
+            pcap_metadata, session_start_time, 0.001, 'ms', agg_points_num, five_tuple_key)
+        s_agg_seq, pcap_metadata, _ = get_session_contextual_packet_len_seq(
+            pcap_metadata, session_start_time, 1, 's', agg_points_num, five_tuple_key)
+        min_agg_seq, pcap_metadata, _ = get_session_contextual_packet_len_seq(
+            pcap_metadata, session_start_time, 60, 'min', agg_points_num, five_tuple_key)
+
+        contextual_data[idx, 0, :, :] = wavelet_transform(ms_agg_seq, wave_name, agg_points_num)
+        contextual_data[idx, 1, :, :] = wavelet_transform(s_agg_seq, wave_name, agg_points_num)
+        contextual_data[idx, 2, :, :] = wavelet_transform(min_agg_seq, wave_name, agg_points_num)
+        agg_seqs[idx, 0, :] = ms_agg_seq
+        agg_seqs[idx, 1, :] = s_agg_seq
+        agg_seqs[idx, 2, :] = min_agg_seq
+        session_features_seqs.append(session_features_seq)
+        seqs.append(seq)
+        session_pcaps_used.append(session_pcap)
+        idx += 1
+        print(f'get presplit contextual data of {session_pcap} successfully')
+    return contextual_data[:idx, :, :, :], agg_seqs[:idx, :, :], session_pcaps_used, session_features_seqs, seqs
+
+
+def save_presplit_label_data(label_output_dir, label_name, wave_name, temporal_data, temporal_mask,
+                             contextual_data, agg_seqs, session_pcaps_used,
+                             session_features_seqs=None, seqs=None):
+    if not os.path.exists(label_output_dir):
+        os.makedirs(label_output_dir)
+
+    temporal_path = os.path.join(label_output_dir, f'{label_name}_temporal.npy')
+    mask_path = os.path.join(label_output_dir, f'{label_name}_temporal_mask.npy')
+    contextual_path = os.path.join(label_output_dir, f'{label_name}_{wave_name}_contextual.npy')
+    agg_seqs_path = os.path.join(label_output_dir, f'{label_name}_agg_seqs.npy')
+    used_path = os.path.join(label_output_dir, f'{label_name}_session_used.json')
+
+    np.save(temporal_path, temporal_data)
+    np.save(mask_path, temporal_mask)
+    np.save(contextual_path, contextual_data)
+    np.save(agg_seqs_path, agg_seqs)
+    with open(used_path, 'w+') as f:
+        json.dump(session_pcaps_used, f)
+
+    if session_features_seqs is not None:
+        joblib.dump(session_features_seqs,
+                    os.path.join(label_output_dir, f'{label_name}_session_features_seqs.joblib'))
+    if seqs is not None:
+        joblib.dump(seqs, os.path.join(label_output_dir, f'{label_name}_seqs.npy'))
+
+    print(f'save {temporal_path}, {mask_path}, {contextual_path}, {agg_seqs_path} and {used_path} successfully')
+
+
+def gen_presplit_single_label_data(label_dir, label_name, data_path, wave_name,
+                                   session_len=64, packet_len=64, packet_offset=14,
+                                   agg_points_num=128, min_pkt_num=1):
+    session_pcaps = get_contents_in_dir(label_dir, ['.'], ['.pcap', '.pcapng'])
+    session_pcaps = [p for p in session_pcaps if p.endswith(('.pcap', '.pcapng'))]
+    if len(session_pcaps) == 0:
+        print(f'{label_dir} has no pcap files, skip')
+        return 0
+
+    process_start_time = time.time()
+    temporal_data, temporal_mask, session_pcaps_used = gen_presplit_temporal_data(
+        session_pcaps, session_len, packet_len, packet_offset, min_pkt_num)
+    if len(session_pcaps_used) == 0:
+        print(f'{label_name} has no valid sessions after temporal parsing')
+        return 0
+
+    pcap_metadata, session_metadata_map = parse_presplit_label_metadata(session_pcaps_used)
+    if pcap_metadata.empty:
+        print(f'{label_name} has no valid metadata for contextual aggregation')
+        return 0
+
+    contextual_data, agg_seqs, contextual_session_pcaps_used, session_features_seqs, seqs = \
+        gen_presplit_contextual_data(pcap_metadata, session_metadata_map, session_pcaps_used,
+                                     wave_name, agg_points_num)
+    if len(contextual_session_pcaps_used) == 0:
+        print(f'{label_name} has no valid contextual samples')
+        return 0
+
+    temporal_idx = [session_pcaps_used.index(p) for p in contextual_session_pcaps_used]
+    sample_num = len(contextual_session_pcaps_used)
+    temporal_data = temporal_data[temporal_idx, :, :]
+    temporal_mask = temporal_mask[temporal_idx, :, :]
+    label_output_dir = os.path.join(data_path, label_name)
+    save_presplit_label_data(label_output_dir, label_name, wave_name, temporal_data, temporal_mask,
+                             contextual_data, agg_seqs, contextual_session_pcaps_used,
+                             session_features_seqs, seqs)
+    process_end_time = time.time()
+    print(f'{label_name} presplit data Done, total {sample_num} samples, '
+          f'time cost: {process_end_time - process_start_time} s')
+    return sample_num
+
+
+def gen_presplit_multi_traffic_type_data(pcaps_path, data_path, wave_name,
+                                         session_len=64, packet_len=64, packet_offset=14,
+                                         agg_points_num=128, min_pkt_num=1):
+    label_dirs = get_contents_in_dir(pcaps_path, ['.'], [])
+    label_dirs = [d for d in label_dirs if os.path.isdir(d)]
+    total_samples = 0
+    for label_dir in label_dirs:
+        label_name = os.path.split(label_dir)[1]
+        total_samples += gen_presplit_single_label_data(label_dir, label_name, data_path, wave_name,
+                                                        session_len, packet_len, packet_offset,
+                                                        agg_points_num, min_pkt_num)
+    print(f'presplit data generation finished, total samples: {total_samples}')
+
+
 def visualize_data(data, data_name):
     def plot_figure(matrix, cmap, save_name):
         fig, axs = plt.subplots(nrows=3, ncols=3, figsize=(9, 9),
@@ -459,6 +645,7 @@ if __name__ == '__main__':
     args = argparse.ArgumentParser()
     args.add_argument('--multiple', action='store_true', required=False)
     args.add_argument('--contextual', action='store_true', required=False)
+    args.add_argument('--presplit', action='store_true', required=False)
     args.add_argument('--pcaps_path', type=str, required=True)
     args.add_argument('--class_name', type=str, required=False)
     args.add_argument('--sessions_dir', type=str, required=False)
@@ -466,12 +653,22 @@ if __name__ == '__main__':
     args.add_argument('--wave_name', type=str, required=True)
     args.add_argument('--session_pcaps_used', type=str, required=False, default=None)
     args.add_argument('--agg_seqs_path', type=str, required=False, default=None)
+    args.add_argument('--session_len', type=int, required=False, default=64)
+    args.add_argument('--packet_len', type=int, required=False, default=64)
+    args.add_argument('--packet_offset', type=int, required=False, default=14)
+    args.add_argument('--agg_points_num', type=int, required=False, default=128)
+    args.add_argument('--min_pkt_num', type=int, required=False, default=1)
     args = args.parse_args()
     print(args)
 
+    # python dataset_gen.py --presplit --pcaps_path=/path/to/dataset --data_path=/path/to/save --wave_name=cgau8 --session_len=64 --packet_len=64 --min_pkt_num=1
+    if args.presplit:
+        gen_presplit_multi_traffic_type_data(args.pcaps_path, args.data_path, args.wave_name,
+                                             args.session_len, args.packet_len, args.packet_offset,
+                                             args.agg_points_num, args.min_pkt_num)
     # 
     # python dataset_gen.py --multiple --pcaps_path=/xxx/xxx/ --data_path=/path/to/save --wave_name='cgau8'
-    if args.multiple:
+    elif args.multiple:
         gen_multi_traffic_type_data(args.pcaps_path, args.data_path, args.wave_name)
     # 
     # python dataset_gen.py --contextual --pcaps_path=/xxx/traffic_type.pcap --session_pcaps_used=/xxx/xxx_temporal_session_used.json --wave_name=cgau8 --data_path=/xxx/xxx.npy

@@ -293,19 +293,33 @@ def train_test_helper(data_dir, agg_scales, model_name, agg_scale_num, agg_point
     dataset = TrafficScopeDataset(data_dir, agg_scales)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 数据划分: Train:Val:Test = 1:1:8 (10% : 10% : 80%)
+    if k_fold:
+        print('k_fold is ignored: using a single Train:Val:Test = 1:1:8 split.')
+
     indices = np.arange(dataset.temporal_data.shape[0])
+    labels = dataset.labels.astype(int)
+    try:
+        temp_idx, test_idx = train_test_split(indices, test_size=0.8, random_state=42,
+                                             shuffle=True, stratify=labels)
+        train_idx, val_idx = train_test_split(temp_idx, test_size=0.5, random_state=42,
+                                             shuffle=True, stratify=labels[temp_idx])
+        print('use stratified Train:Val:Test = 1:1:8 split')
+    except ValueError as exc:
+        print(f'WARNING: stratified split failed ({exc}); fallback to shuffled split.')
+        temp_idx, test_idx = train_test_split(indices, test_size=0.8, random_state=42, shuffle=True)
+        train_idx, val_idx = train_test_split(temp_idx, test_size=0.5, random_state=42, shuffle=True)
 
-    # 先划分出测试集(80%)和临时集(20%)
-    temp_idx, test_idx = train_test_split(indices, test_size=0.8, random_state=42, shuffle=True)
-    # 再将临时集划分为训练集(50%)和验证集(50%)
-    train_idx, val_idx = train_test_split(temp_idx, test_size=0.5, random_state=42, shuffle=True)
+    def print_split_stats(name, split_idx):
+        unique, counts = np.unique(labels[split_idx], return_counts=True)
+        min_count = counts.min() if len(counts) else 0
+        print(f'  {name}: {len(split_idx)} ({len(split_idx)/len(indices)*100:.1f}%), '
+              f'classes: {len(unique)}, min/class: {min_count}')
 
-    print(f'\n数据集划分:')
-    print(f'  训练集: {len(train_idx)} ({len(train_idx)/len(indices)*100:.1f}%)')
-    print(f'  验证集: {len(val_idx)} ({len(val_idx)/len(indices)*100:.1f}%)')
-    print(f'  测试集: {len(test_idx)} ({len(test_idx)/len(indices)*100:.1f}%)')
-    print(f'  总计: {len(indices)}\n')
+    print('\nEffective dataset split:')
+    print_split_stats('Train', train_idx)
+    print_split_stats('Val', val_idx)
+    print_split_stats('Test', test_idx)
+    print(f'  Total: {len(indices)}\n')
 
     if model_name == TRAFFIC_SCOPE:
         if is_train:

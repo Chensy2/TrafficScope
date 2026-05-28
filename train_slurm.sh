@@ -44,7 +44,7 @@ NUM_LAYERS=4
 DROPOUT=0.5
 
 # 数据维度
-TEMPORAL_SEQ_LEN=128
+TEMPORAL_SEQ_LEN=64
 PACKET_LEN=64
 FREQS_SIZE=128
 AGG_POINTS_NUM=128
@@ -118,7 +118,8 @@ python train_test.py \
     --result_path="$RESULT_PATH" \
     --temporal_seq_len=$TEMPORAL_SEQ_LEN \
     --packet_len=$PACKET_LEN \
+    --agg_scale_num=$AGG_SCALE_NUM \
     --agg_points_num=$AGG_POINTS_NUM \
-    --freqs_size=$FREQS_SIZE \
+    --freqs_size=$FREQS_SIZE
 
 echo "训练完成！"
